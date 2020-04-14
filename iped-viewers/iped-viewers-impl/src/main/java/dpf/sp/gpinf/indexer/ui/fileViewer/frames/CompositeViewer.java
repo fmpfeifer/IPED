@@ -82,7 +82,6 @@ public class CompositeViewer extends JPanel implements ChangeListener, ActionLis
         if (viewer instanceof ATextViewer) {
             textViewer = viewer;
         }
-
     }
 
     public void initViewers() {
@@ -207,6 +206,13 @@ public class CompositeViewer extends JPanel implements ChangeListener, ActionLis
                     viewer.loadFile(viewFile, viewMediaType, highlightTerms);
                 }
             }
+        } else if (viewer.isSupportedType(contentType)){
+            if (!loadedViewers.contains(viewer)) {
+                loadedViewers.add(viewer);
+                if (viewer instanceof VlcViewer) {
+                    viewer.loadFile(file, contentType, highlightTerms);
+                }
+            } 
         } else {
             viewer.loadFile(null);
         }

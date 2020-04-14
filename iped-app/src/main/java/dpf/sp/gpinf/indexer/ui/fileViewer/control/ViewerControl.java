@@ -30,6 +30,7 @@ import dpf.sp.gpinf.indexer.ui.fileViewer.frames.TiffViewer;
 import dpf.sp.gpinf.indexer.ui.fileViewer.frames.TikaHtmlViewer;
 import dpf.sp.gpinf.indexer.ui.fileViewer.frames.Viewer;
 import dpf.sp.gpinf.indexer.ui.fileViewer.frames.ViewersRepository;
+import dpf.sp.gpinf.indexer.ui.fileViewer.frames.VlcViewer;
 import dpf.sp.gpinf.indexer.ui.fileViewer.util.AppSearchParams;
 import dpf.sp.gpinf.indexer.util.FileContentSource;
 import dpf.sp.gpinf.indexer.util.JarLoader;
@@ -81,7 +82,14 @@ public class ViewerControl implements IViewerControl {
                             params.textViewer = new TextViewer(params);
                             params.compositeViewer.addViewer(params.textViewer);
                             params.compositeViewer.addViewer(new MetadataViewer());
+                            try {
+                                VlcViewer vlcViewer = VlcViewer.detachAndGetInstance();
+                                params.compositeViewer.addViewer(vlcViewer);
+                            } catch (Throwable e) {
+                                e.printStackTrace();
+                            }
                             params.compositeViewer.addViewer(viewersRepository);
+                            
 
                             viewersRepository.addViewer(new ImageViewer());
                             viewersRepository.addViewer(new CADViewer());
@@ -98,6 +106,9 @@ public class ViewerControl implements IViewerControl {
 
                             viewersRepository.addViewer(new IcePDFViewer());
                             viewersRepository.addViewer(new TiffViewer());
+                            
+                            
+                            //viewersRepository.addViewer(new VlcViewer());
                         }
                     });
                 } catch (Exception e) {
