@@ -79,6 +79,7 @@ import dpf.sp.gpinf.indexer.util.VersionsMap;
 import gpinf.dev.data.CaseData;
 import gpinf.dev.data.Item;
 import iped3.ICaseData;
+import iped3.search.IItemSearcher;
 import iped3.search.LuceneSearchResult;
 
 /**
@@ -407,8 +408,14 @@ public class Manager {
             }
 
             if (!someWorkerAlive) {
+                IItemSearcher searcher = (IItemSearcher)caseData.getCaseObject(IItemSearcher.class.getName());
+                if(searcher != null) searcher.close();
+                
                 if (caseData.changeToNextQueue() != null) {
                     LOGGER.info("Changed to processing queue with priority " + caseData.getCurrentQueuePriority()); //$NON-NLS-1$
+                    
+                    caseData.putCaseObject(IItemSearcher.class.getName(), new ItemSearcher(output.getParentFile(), writer));
+                    
                     someWorkerAlive = true;
                     for (int k = 0; k < workers.length; k++)
                         workers[k].processNextQueue();

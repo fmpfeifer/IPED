@@ -63,9 +63,6 @@ public class FolderTreeReader extends DataSourceReader {
 
         rootFile = file;
         evidenceName = getEvidenceName(file);
-        if (evidenceName == null) {
-            evidenceName = file.getName();
-        }
         dataSource = new DataSource(file);
         dataSource.setName(evidenceName);
 
@@ -142,7 +139,6 @@ public class FolderTreeReader extends DataSourceReader {
 
                 if (attr.isDirectory()) {
                     item.setIsDir(true);
-                    parentIds.addLast(item.getId());
                 }
 
                 item.setAccessDate(new Date(attr.lastAccessTime().toMillis()));
@@ -155,6 +151,11 @@ public class FolderTreeReader extends DataSourceReader {
 
                 } catch (InterruptedException e) {
                     return FileVisitResult.TERMINATE;
+                }
+                
+                if (attr.isDirectory()) {
+                    //must getId() after caseData.addItem(), it could set item id to previous id with --continue
+                    parentIds.addLast(item.getId());
                 }
             }
 
