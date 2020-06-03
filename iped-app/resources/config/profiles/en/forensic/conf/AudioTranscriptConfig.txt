@@ -31,3 +31,8 @@ mimesToProcess = audio
 
 # Max number of seconds to wait until each audio second is transcribed. A minimum of 10s is always wait.
 timeout = 3
+
+# Redis URL - if uncommented, will cache all the transcriptions in the redis database. 
+# Format: redis://[[username:]password@]host[:port][/database]
+# Format SSL: rediss://[[username:]password@]host[:port][/database]
+#redisUrl = redis://localhost:6379

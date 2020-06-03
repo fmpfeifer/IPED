@@ -9,8 +9,10 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 import org.apache.tika.mime.MediaType;
@@ -25,6 +27,9 @@ import dpf.sp.gpinf.indexer.process.task.AbstractTask;
 import dpf.sp.gpinf.indexer.process.task.VideoThumbTask;
 import dpf.sp.gpinf.indexer.util.IOUtil;
 import dpf.sp.gpinf.indexer.util.UTF8Properties;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.api.sync.RedisCommands;
 import iped3.IItem;
 import iped3.util.ExtraProperties;
 
@@ -43,6 +48,8 @@ public abstract class AbstractTranscriptTask extends AbstractTask{
     private static final String MIMES_KEY = "mimesToProcess";
     
     private static final String CONVERT_CMD_KEY = "convertCommand";
+    
+    private static final String REDIS_URL_KEY = "redisUrl";
     
     private static final String TEST_FFMPEG = "ffmpeg -version";
     
@@ -79,6 +86,10 @@ public abstract class AbstractTranscriptTask extends AbstractTask{
     protected boolean isEnabled = false;
     
     protected IItem evidence;
+    
+    protected static RedisClient redisClient;
+    
+    protected static StatefulRedisConnection<String, String> redisConnection;
     
     @Override
     public boolean isEnabled() {
@@ -163,6 +174,27 @@ public abstract class AbstractTranscriptTask extends AbstractTask{
         return null;
     }
     
+    private TextAndScore getTextFromRedis(String id) throws IOException {
+        if (redisClient == null) {
+            return null;
+        }
+        RedisCommands<String, String> commands = redisConnection.sync();
+        Map<String, String> redisData = commands.hgetall(id);
+        if (redisData != null && !redisData.isEmpty()) {
+            TextAndScore result = new TextAndScore();
+            result.text = redisData.get("text");
+            try {
+                result.score = Double.parseDouble(redisData.get("score"));
+            } catch (Exception e) {
+                commands.hdel(id, "text", "score");
+                return null;
+            }
+            LOGGER.info("GET text from REDIS SERVER {} ==> {}", id, result.text);
+            return result;
+        }
+        return null;
+    }
+    
     private void storeTextInDb(String id, String text, double score) throws IOException {
         try(PreparedStatement ps = conn.prepareStatement(INSERT_DATA)){
             ps.setString(1, id);
@@ -172,6 +204,16 @@ public abstract class AbstractTranscriptTask extends AbstractTask{
         } catch (SQLException e) {
             throw new IOException(e);
         }
+    }
+    
+    private void storeTextInRedis(String id, String text, double score) throws IOException {
+        if (redisClient == null) {
+            return;
+        }
+        RedisCommands<String, String> commands = redisConnection.sync();
+        commands.hset(id, "text", text);
+        commands.hset(id, "score", Double.toString(score));
+        LOGGER.info("PUT text into REDIS SERVER {} ==> {}", id, text);
     }
 
     @Override
@@ -205,8 +247,19 @@ public abstract class AbstractTranscriptTask extends AbstractTask{
             createConnection();
         }
         
+        createRedisConnection(props.getProperty(REDIS_URL_KEY));
         //testFfmpeg();
         
+    }
+    
+    private synchronized static void createRedisConnection(String url) {
+        if (url != null) {
+            if (redisClient == null) {
+                redisClient = RedisClient.create(url.trim());
+                redisClient.setDefaultTimeout(Duration.ofSeconds(10));
+                redisConnection = redisClient.connect();
+            }
+        }
     }
     
     protected File getWavFile(IItem evidence) throws IOException, InterruptedException {
@@ -246,6 +299,14 @@ public abstract class AbstractTranscriptTask extends AbstractTask{
             conn.close();
             conn = null;
         }
+        if (redisClient != null) {
+            if (redisConnection != null) {
+                redisConnection.close();
+                redisConnection = null;
+            }
+            redisClient.shutdown();
+            redisClient = null;
+        }
     }
 
     @Override
@@ -256,11 +317,16 @@ public abstract class AbstractTranscriptTask extends AbstractTask{
         }
         
         TextAndScore prevResult = getTextFromDb(evidence.getHash());
+        if (prevResult == null) {
+            prevResult = getTextFromRedis(evidence.getHash());
+        }
+        
         if(prevResult != null) {
             evidence.getMetadata().set(ExtraProperties.CONFIDENCE_ATTR, Double.toString(prevResult.score));
             evidence.getMetadata().set(ExtraProperties.TRANSCRIPT_ATTR, prevResult.text);
             return;
         }
+        
         
         File tempWav = getWavFile(evidence);
         if(tempWav == null) {
@@ -274,6 +340,7 @@ public abstract class AbstractTranscriptTask extends AbstractTask{
                 evidence.getMetadata().set(ExtraProperties.CONFIDENCE_ATTR, Double.toString(result.score));
                 evidence.getMetadata().set(ExtraProperties.TRANSCRIPT_ATTR, result.text);
                 storeTextInDb(evidence.getHash(), result.text, result.score);
+                storeTextInRedis(evidence.getHash(), result.text, result.score);
             }
             
         }finally {
