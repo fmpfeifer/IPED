@@ -81,7 +81,7 @@ public class ExtractorIOS extends Extractor {
                 } catch (SQLException | WAExtractorException ex) {
                     throw new RuntimeException(ex);
                 }
-            });
+            }, 1000);
         } catch (SQLException ex) {
             throw new WAExtractorException(ex);
         }
@@ -160,7 +160,7 @@ public class ExtractorIOS extends Extractor {
                     } catch (SQLException | ParseException ex) {
                         throw new RuntimeException(ex);
                     }
-                });
+                }, 10000);
 
                 return messages;
 

@@ -46,7 +46,7 @@ public class DBList<E> extends AbstractList<E> implements AutoCloseable {
     /**
      * Number of items in a data page
      */
-    private static int PAGE_SIZE = 1000;
+    private int page_size;
     
     /**
      * Start of current page
@@ -83,13 +83,15 @@ public class DBList<E> extends AbstractList<E> implements AutoCloseable {
             PreparedStatement countStmt, 
             int lowerBoundParam,
             int upperBoundParam,
-            Function<ResultSet, E> itemProducer) throws SQLException {
+            Function<ResultSet, E> itemProducer,
+            int page_size) throws SQLException {
         this.selectStmt = selectStmt;
         this.lowerBoundParam = lowerBoundParam;
         this.upperBoundParam = upperBoundParam;
         this.pageStart = -1;
         this.itemProducer = itemProducer;
-        this.pageCache = new ArrayList<>(PAGE_SIZE);
+        this.page_size = page_size;
+        this.pageCache = new ArrayList<>(page_size);
         this.size = execCountQuery(countStmt);
     }
     
@@ -105,10 +107,10 @@ public class DBList<E> extends AbstractList<E> implements AutoCloseable {
     }
     
     private void loadPageIfNeeded(int index) throws SQLException {
-        if (pageStart < 0 || index < pageStart || index >= pageStart + PAGE_SIZE) {
-            pageStart = index - index % PAGE_SIZE;
+        if (pageStart < 0 || index < pageStart || index >= pageStart + page_size) {
+            pageStart = index - index % page_size;
             selectStmt.setInt(lowerBoundParam, pageStart);
-            selectStmt.setInt(upperBoundParam, pageStart + PAGE_SIZE);
+            selectStmt.setInt(upperBoundParam, pageStart + page_size);
             pageCache.clear();
             try (ResultSet resultSet = selectStmt.executeQuery()) {
                 while (resultSet.next()) {
@@ -122,7 +124,7 @@ public class DBList<E> extends AbstractList<E> implements AutoCloseable {
     public E get(int index) {
         try {
             loadPageIfNeeded(index);
-            return pageCache.get(index % PAGE_SIZE);
+            return pageCache.get(index % page_size);
         } catch (SQLException ex) {
             throw new RuntimeException(ex);
         }

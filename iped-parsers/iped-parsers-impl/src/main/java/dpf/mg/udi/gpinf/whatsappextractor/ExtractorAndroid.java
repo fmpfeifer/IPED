@@ -83,7 +83,7 @@ public class ExtractorAndroid extends Extractor {
                 } catch (SQLException | WAExtractorException ex) {
                     throw new RuntimeException(ex);
                 }
-            });
+            }, 1000);
 
             return list;
         } catch (SQLException ex) {
@@ -165,7 +165,7 @@ public class ExtractorAndroid extends Extractor {
                     } catch (SQLException ex) {
                         throw new RuntimeException(ex);
                     }
-                });
+                }, 10000);
 
                 return list;
             } catch (SQLException ex) {
