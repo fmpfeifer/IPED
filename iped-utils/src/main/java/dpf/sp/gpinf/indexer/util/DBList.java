@@ -137,7 +137,8 @@ public class DBList<E> extends AbstractList<E> implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        selectStmt.close();        
+        selectStmt.close();    
+        pageCache.clear();
     }
 
 }
