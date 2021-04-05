@@ -37,13 +37,13 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
-import java.util.List;
+import java.util.function.Supplier;
 
 import dpf.mg.udi.gpinf.whatsappextractor.Message.MessageStatus;
 import dpf.sp.gpinf.indexer.parsers.jdbc.SQLite3DBParser;
+import dpf.sp.gpinf.indexer.util.DBList;
 
 /**
  *
@@ -59,41 +59,119 @@ public class ExtractorAndroid extends Extractor {
     }
 
     @Override
-    protected List<Chat> extractChatList() throws WAExtractorException {
-        List<Chat> list = new ArrayList<>();
-
-        try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
+    public DBList<Chat> extractChatList(Connection conn) throws WAExtractorException {
+        try {
             boolean hasSortTimestamp = databaseHasSortTimestamp(conn);
             hasThumbTable = databaseHashThumbnailsTable(conn);
             hasEditVersionCol = SQLite3DBParser.checkIfColumnExists(conn, "messages", "edit_version");
             String selectChatQuery = hasSortTimestamp ? SELECT_CHAT_LIST : SELECT_CHAT_LIST_NO_SORTTIMESTAMP;
-            try (ResultSet rs = stmt.executeQuery(selectChatQuery)) {
-
-                while (rs.next()) {
+            PreparedStatement selectStmt = conn.prepareStatement(selectChatQuery);
+            PreparedStatement countStmt = conn.prepareStatement(SELECT_COUNT_CHAT_LIST);
+            DBList<Chat> list = new DBList<>(selectStmt, countStmt, 1, 2, rs -> {
+                try {
                     String contactId = rs.getString("contact"); //$NON-NLS-1$
                     WAContact remote = contacts.getContact(contactId);
                     Chat c = new Chat(remote);
                     c.setId(rs.getLong("id"));
                     c.setSubject(Util.getUTF8String(rs, "subject")); //$NON-NLS-1$
                     c.setGroupChat(contactId.endsWith("g.us")); //$NON-NLS-1$
-                    if (!(contactId.endsWith("@status") || contactId.endsWith("@broadcast"))) { //$NON-NLS-1$ //$NON-NLS-2$
-                        list.add(c);
-                    }
-                }
-
-                for (Chat c : list) {
-                    c.setMessages(extractMessages(conn, c.getRemote(), c.isGroupChat()));
+                    c.setMessagesSupplier(getMessagesSupplier(conn, remote, c.isGroupChat()));
                     if (c.isGroupChat()) {
                         setGroupMembers(c, conn);
                     }
+                    return c;
+                } catch (SQLException | WAExtractorException ex) {
+                    throw new RuntimeException(ex);
                 }
+            });
 
-            }
+            return list;
         } catch (SQLException ex) {
             throw new WAExtractorException(ex);
         }
 
-        return list;
+    }
+
+    private Supplier<DBList<Message>> getMessagesSupplier(Connection conn, WAContact remote, boolean isGroupChat) {
+        return () -> {
+            try {
+                PreparedStatement selectStmt = conn.prepareStatement(hasThumbTable ? SELECT_MESSAGES_THUMBS_TABLE
+                        : hasEditVersionCol ? SELECT_MESSAGES_NO_THUMBS_TABLE : SELECT_MESSAGES_NO_EDIT_VERSION);
+                selectStmt.setFetchSize(1000);
+                String id = remote.getId();
+                id += isGroupChat ? "@g.us" : "@s.whatsapp.net"; //$NON-NLS-1$ //$NON-NLS-2$
+                selectStmt.setString(1, id);
+                PreparedStatement countStmt = conn.prepareStatement(SELECT_COUNT_MESSAGES);
+                countStmt.setString(1, id);
+
+                DBList<Message> list = new DBList<>(selectStmt, countStmt, 2, 3, rs -> {
+                    try {
+                        Message m = new Message();
+                        if (account != null)
+                            m.setLocalResource(account.getId());
+                        int type = rs.getInt("messageType"); //$NON-NLS-1$
+                        int status = rs.getInt("status"); //$NON-NLS-1$
+                        String caption = rs.getString("mediaCaption"); //$NON-NLS-1$
+                        String str = SQLite3DBParser.getStringIfExists(rs, "edit_version"); //$NON-NLS-1$
+                        Integer edit_version = str != null ? Integer.parseInt(str) : null;
+                        long media_size = rs.getLong("mediaSize"); //$NON-NLS-1$
+                        m.setId(rs.getLong("id")); //$NON-NLS-1$
+                        String remoteResource = rs.getString("remoteResource");
+                        if (remoteResource == null || remoteResource.isEmpty() || !isGroupChat) {
+                            remoteResource = remote.getFullId();
+                        }
+                        m.setRemoteResource(remoteResource); // $NON-NLS-1$
+                        m.setStatus(status); // $NON-NLS-1$
+                        m.setData(Util.getUTF8String(rs, "data")); //$NON-NLS-1$
+                        m.setFromMe(rs.getInt("fromMe") == 1); //$NON-NLS-1$
+                        m.setTimeStamp(new Date(rs.getLong("timestamp"))); //$NON-NLS-1$
+                        m.setMediaUrl(rs.getString("mediaUrl")); //$NON-NLS-1$
+                        m.setMediaMime(rs.getString("mediaMime")); //$NON-NLS-1$
+                        m.setMediaName(rs.getString("mediaName")); //$NON-NLS-1$
+                        m.setMediaCaption(caption); // $NON-NLS-1$
+                        m.setMediaHash(rs.getString("mediaHash"), true); //$NON-NLS-1$
+                        m.setMediaSize(media_size);
+                        m.setLatitude(rs.getDouble("latitude")); //$NON-NLS-1$
+                        m.setLongitude(rs.getDouble("longitude")); //$NON-NLS-1$
+                        m.setMessageType(decodeMessageType(type, status, edit_version, caption, (int) media_size));
+                        m.setMediaDuration(rs.getInt("media_duration")); //$NON-NLS-1$
+                        if (m.getMessageType() == CONTACT_MESSAGE) {
+                            m.setVcards(Arrays.asList(new String[] { m.getData() }));
+                        }
+                        byte[] thumbData = rs.getBytes("rawData"); //$NON-NLS-1$
+                        if (thumbData == null) {
+                            thumbData = rs.getBytes("thumbData"); //$NON-NLS-1$
+                        }
+                        m.setThumbData(thumbData);
+                        if (m.isFromMe()) {
+                            switch (m.getStatus()) {
+                                case 4:
+                                    m.setMessageStatus(MessageStatus.MESSAGE_SENT);
+                                    break;
+                                case 5:
+                                    m.setMessageStatus(MessageStatus.MESSAGE_DELIVERED);
+                                    break;
+                                case 13:
+                                    m.setMessageStatus(MessageStatus.MESSAGE_VIEWED);
+                                    break;
+                                case 0:
+                                    m.setMessageStatus(MessageStatus.MESSAGE_UNSENT);
+                                    break;
+                                default:
+                                    break;
+                            }
+                        }
+                        return m;
+                    } catch (SQLException ex) {
+                        throw new RuntimeException(ex);
+                    }
+                });
+
+                return list;
+            } catch (SQLException ex) {
+                throw new RuntimeException(ex);
+            }
+        };
     }
 
     private void setGroupMembers(Chat c, Connection conn) throws WAExtractorException {
@@ -138,79 +216,6 @@ public class ExtractorAndroid extends Extractor {
             }
         }
         return result;
-    }
-
-    private List<Message> extractMessages(Connection conn, WAContact remote, boolean isGroupChat) throws SQLException {
-        List<Message> messages = new ArrayList<>();
-        try (PreparedStatement stmt = conn
-                .prepareStatement(hasThumbTable ? SELECT_MESSAGES_THUMBS_TABLE
-                        : hasEditVersionCol ? SELECT_MESSAGES_NO_THUMBS_TABLE : SELECT_MESSAGES_NO_EDIT_VERSION)) {
-            stmt.setFetchSize(1000);
-            String id = remote.getId();
-            id += isGroupChat ? "@g.us" : "@s.whatsapp.net"; //$NON-NLS-1$ //$NON-NLS-2$
-            stmt.setString(1, id);
-            ResultSet rs = stmt.executeQuery();
-            while (rs.next()) {
-                Message m = new Message();
-                if (account != null)
-                    m.setLocalResource(account.getId());
-                int type = rs.getInt("messageType"); //$NON-NLS-1$
-                int status = rs.getInt("status"); //$NON-NLS-1$
-                String caption = rs.getString("mediaCaption"); //$NON-NLS-1$
-                String str = SQLite3DBParser.getStringIfExists(rs, "edit_version"); //$NON-NLS-1$
-                Integer edit_version = str != null ? Integer.parseInt(str) : null;
-                long media_size = rs.getLong("mediaSize"); //$NON-NLS-1$
-                m.setId(rs.getLong("id")); //$NON-NLS-1$
-                String remoteResource = rs.getString("remoteResource");
-                if (remoteResource == null || remoteResource.isEmpty() || !isGroupChat) {
-                    remoteResource = remote.getFullId();
-                }
-                m.setRemoteResource(remoteResource); // $NON-NLS-1$
-                m.setStatus(status); // $NON-NLS-1$
-                m.setData(Util.getUTF8String(rs, "data")); //$NON-NLS-1$
-                m.setFromMe(rs.getInt("fromMe") == 1); //$NON-NLS-1$
-                m.setTimeStamp(new Date(rs.getLong("timestamp"))); //$NON-NLS-1$
-                m.setMediaUrl(rs.getString("mediaUrl")); //$NON-NLS-1$
-                m.setMediaMime(rs.getString("mediaMime")); //$NON-NLS-1$
-                m.setMediaName(rs.getString("mediaName")); //$NON-NLS-1$
-                m.setMediaCaption(caption); // $NON-NLS-1$
-                m.setMediaHash(rs.getString("mediaHash"), true); //$NON-NLS-1$
-                m.setMediaSize(media_size);
-                m.setLatitude(rs.getDouble("latitude")); //$NON-NLS-1$
-                m.setLongitude(rs.getDouble("longitude")); //$NON-NLS-1$
-                m.setMessageType(decodeMessageType(type, status, edit_version, caption, (int) media_size));
-                m.setMediaDuration(rs.getInt("media_duration")); //$NON-NLS-1$
-                if (m.getMessageType() == CONTACT_MESSAGE) {
-                    m.setVcards(Arrays.asList(new String[] { m.getData() }));
-                }
-                byte[] thumbData = rs.getBytes("rawData"); //$NON-NLS-1$
-                if (thumbData == null) {
-                    thumbData = rs.getBytes("thumbData"); //$NON-NLS-1$
-                }
-                m.setThumbData(thumbData);
-                if (m.isFromMe()) {
-                    switch (m.getStatus()) {
-                        case 4:
-                            m.setMessageStatus(MessageStatus.MESSAGE_SENT);
-                            break;
-                        case 5:
-                            m.setMessageStatus(MessageStatus.MESSAGE_DELIVERED);
-                            break;
-                        case 13:
-                            m.setMessageStatus(MessageStatus.MESSAGE_VIEWED);
-                            break;
-                        case 0:
-                            m.setMessageStatus(MessageStatus.MESSAGE_UNSENT);
-                            break;
-                        default:
-                            break;
-                    }
-                }
-                messages.add(m);
-
-            }
-        }
-        return messages;
     }
 
     protected Message.MessageType decodeMessageType(int messageType, int status, Integer edit_version, String caption,
@@ -312,12 +317,12 @@ public class ExtractorAndroid extends Extractor {
                         result = DELETED_FROM_SENDER;
                     }
                 }
-                break; 
+                break;
             case 16:
                 result = SHARE_LOCATION_MESSAGE;
                 break;
             case 20:
-            	result=STICKER_MESSAGE;
+                result = STICKER_MESSAGE;
             default:
                 break;
         }
@@ -327,34 +332,50 @@ public class ExtractorAndroid extends Extractor {
     /**
      * ** static strings ***
      */
-    private static final String SELECT_CHAT_LIST = "SELECT _id as id,key_remote_jid AS contact," //$NON-NLS-1$
-            + " subject, creation, sort_timestamp FROM chat_list ORDER BY sort_timestamp DESC"; //$NON-NLS-1$
+    private static final String SELECT_CHAT_LIST = "WITH cte AS (SELECT ROW_NUMBER() OVER (ORDER BY sort_timestamp DESC) rowNumber, " //$NON-NLS-1$
+            + "_id as id,key_remote_jid AS contact, " //$NON-NLS-1$
+            + "subject, creation, sort_timestamp FROM chat_list " //$NON-NLS-1$
+            + "WHERE NOT (contact LIKE '%@broadcast' OR contact LIKE '%@status') ) " //$NON-NLS-1$
+            + "SELECT * FROM cte WHERE rowNumber > ? AND rowNumber <= ? " //$NON-NLS-1$
+            + "ORDER BY rowNumber"; //$NON-NLS-1$
 
-    private static final String SELECT_CHAT_LIST_NO_SORTTIMESTAMP = "SELECT _id as id,key_remote_jid AS contact," //$NON-NLS-1$
-            + " subject, creation FROM chat_list ORDER BY creation DESC"; //$NON-NLS-1$
+    private static final String SELECT_CHAT_LIST_NO_SORTTIMESTAMP = "WITH cte AS (SELECT ROW_NUMBER() OVER (ORDER BY creation DESC) rowNumber, " //$NON-NLS-1$
+            + " _id as id,key_remote_jid AS contact, " //$NON-NLS-1$
+            + "subject, creation FROM chat_list " //$NON-NLS-1$
+            + "WHERE NOT (contact LIKE '%@broadcast' OR contact LIKE '%@status') ) " //$NON-NLS-1$
+            + "SELECT * FROM cte WHERE rowNumber > ? AND rowNumber <= ? " //$NON-NLS-1$
+            + "ORDER BY rowNumber"; //$NON-NLS-1$
+
+    private static final String SELECT_COUNT_CHAT_LIST = "SELECT count(*) AS recordCount FROM chat_list " //$NON-NLS-1$
+            + "WHERE NOT (key_remote_jid LIKE '%@broadcast' OR key_remote_jid LIKE '%@status')"; //$NON-NLS-1$
 
     /*
      * Filtragem por status de mensagem (status): -1 - mensagens de sistema 0 -
      * mensagens 1 - ? 4 - mensagens 5 - mensagens 6 - ligacao / audio 7 - mensagens
      * 8 - audio enviado 10 - audio recebido 12 - mensagens 13 - mensagens
      */
-    private static final String SELECT_MESSAGES_NO_THUMBS_TABLE = "SELECT _id AS id, key_remote_jid " //$NON-NLS-1$
+    private static final String SELECT_MESSAGES_NO_THUMBS_TABLE = "WITH cte AS (SELECT ROW_NUMBER() OVER (ORDER BY timestamp, _id) rowNumber, " //$NON-NLS-1$
+            + "_id AS id, key_remote_jid " //$NON-NLS-1$
             + "as remoteId, remote_resource AS remoteResource, status, data, " //$NON-NLS-1$
             + "key_from_me as fromMe, timestamp, media_url as mediaUrl, " //$NON-NLS-1$
             + "media_mime_type as mediaMime, media_size as mediaSize, media_name as mediaName, " //$NON-NLS-1$
             + "media_wa_type as messageType, null as thumbData, edit_version, latitude, longitude, media_duration, " //$NON-NLS-1$
             + "media_caption as mediaCaption, media_hash as mediaHash, raw_data as rawData FROM " //$NON-NLS-1$
-            + "messages WHERE remoteId=? and status!=-1 ORDER BY timestamp"; //$NON-NLS-1$
+            + "messages WHERE remoteId=? and status!=-1) " //$NON-NLS-1$
+            + "SELECT * FROM cte WHERE rowNumber > ? AND rowNumber <= ? ORDER BY rowNumber"; //$NON-NLS-2$
 
-    private static final String SELECT_MESSAGES_NO_EDIT_VERSION = "SELECT _id AS id, key_remote_jid " //$NON-NLS-1$
+    private static final String SELECT_MESSAGES_NO_EDIT_VERSION = "WITH cte AS (SELECT ROW_NUMBER() OVER (ORDER BY timestamp, _id) rowNumber, " //$NON-NLS-1$
+            + "_id AS id, key_remote_jid " //$NON-NLS-1$
             + "as remoteId, remote_resource AS remoteResource, status, data, " //$NON-NLS-1$
             + "key_from_me as fromMe, timestamp, media_url as mediaUrl, " //$NON-NLS-1$
             + "media_mime_type as mediaMime, media_size as mediaSize, media_name as mediaName, " //$NON-NLS-1$
             + "media_wa_type as messageType, null as thumbData, latitude, longitude, media_duration, " //$NON-NLS-1$
             + "media_caption as mediaCaption, media_hash as mediaHash, raw_data as rawData FROM " //$NON-NLS-1$
-            + "messages WHERE remoteId=? and status!=-1 ORDER BY timestamp"; //$NON-NLS-1$
+            + "messages WHERE remoteId=? and status!=-1) SELECT * FROM cte WHERE rowNumber > ? AND rowNumber <= ? " // $NON-NLS-2$
+            + "ORDER BY rowNumber"; //$NON-NLS-1$
 
-    private static final String SELECT_MESSAGES_THUMBS_TABLE = "SELECT _id AS id, messages.key_remote_jid " //$NON-NLS-1$
+    private static final String SELECT_MESSAGES_THUMBS_TABLE = "WITH cte AS (SELECT ROW_NUMBER() OVER (ORDER BY messages.timestamp, _id) rowNumber, " //$NON-NLS-1$
+            + "_id AS id, messages.key_remote_jid " //$NON-NLS-1$
             + "as remoteId, remote_resource AS remoteResource, status, data, " //$NON-NLS-1$
             + "messages.key_from_me as fromMe, messages.timestamp as timestamp, media_url as mediaUrl, " //$NON-NLS-1$
             + "media_mime_type as mediaMime, media_size as mediaSize, media_name as mediaName, " //$NON-NLS-1$
@@ -363,7 +384,11 @@ public class ExtractorAndroid extends Extractor {
             + "messages LEFT JOIN message_thumbnails ON (messages.key_id = message_thumbnails.key_id " //$NON-NLS-1$
             + "AND messages.key_remote_jid = message_thumbnails.key_remote_jid " //$NON-NLS-1$
             + "AND messages.key_from_me = message_thumbnails.key_from_me) " //$NON-NLS-1$
-            + "WHERE remoteId=? and status!=-1 ORDER BY timestamp"; //$NON-NLS-1$
+            + "WHERE remoteId=? and status!=-1) " //$NON-NLS-1$
+            + "SELECT * FROM cte WHERE rowNumber > ? AND rowNumber <= ? " //$NON-NLS-1$
+            + "ORDER BY rowNumber"; //$NON-NLS-1$
+    
+    private static final String SELECT_COUNT_MESSAGES = "SELECT count(*) AS recordCount FROM messages WHERE key_remote_jid=? and status!=-1"; //$NON-NLS-1$
 
     private static final String VERIFY_THUMBS_TABLE_EXISTS = "SELECT name FROM sqlite_master " //$NON-NLS-1$
             + "WHERE type='table' AND name='message_thumbnails'"; //$NON-NLS-1$

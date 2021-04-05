@@ -27,10 +27,12 @@ import java.lang.reflect.InvocationTargetException;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -62,7 +64,9 @@ import dpf.sp.gpinf.indexer.parsers.jdbc.SQLite3DBParser;
 import dpf.sp.gpinf.indexer.parsers.jdbc.SQLite3Parser;
 import dpf.sp.gpinf.indexer.parsers.util.EmbeddedParent;
 import dpf.sp.gpinf.indexer.parsers.util.ItemInfo;
+import dpf.sp.gpinf.indexer.util.DBList;
 import dpf.sp.gpinf.indexer.util.EmptyInputStream;
+import dpf.sp.gpinf.indexer.util.ModifiedList;
 import iped3.IItem;
 import iped3.io.IItemBase;
 import iped3.search.IItemSearcher;
@@ -266,8 +270,9 @@ public class WhatsAppParser extends SQLite3DBParser {
                 WAAccount account = getUserAccount(searcher, dbPath, extFactory instanceof ExtractorAndroidFactory);
 
                 Extractor waExtractor = extFactory.createMessageExtractor(tis.getFile(), contacts, account);
-                List<Chat> chatList = waExtractor.getChatList();
-                createReport(chatList, searcher, contacts, handler, extractor, account);
+                try (Connection conn = waExtractor.getConnection(); DBList<Chat> chatList = waExtractor.extractChatList(conn) ) {
+                    createReport(chatList, searcher, contacts, handler, extractor, account);
+                }
 
             } catch (Exception e) {
                 sqliteParser.parse(tis, handler, metadata, context);
@@ -316,6 +321,7 @@ public class WhatsAppParser extends SQLite3DBParser {
         List<IItemBase> result = dpf.sp.gpinf.indexer.parsers.util.Util.getItems(query, searcher);
 
         TemporaryResources tmp = new TemporaryResources();
+        Deque<AutoCloseable> resourcesToClose = new ArrayDeque<>();
         try {
             String dbPath = mainDB.getPath();
             WAContactsDirectory contacts = getWAContactsDirectoryForPath(dbPath, searcher, extFactory.getClass());
@@ -325,8 +331,12 @@ public class WhatsAppParser extends SQLite3DBParser {
             TikaInputStream mainTis = TikaInputStream.get(stream, tmp);
             File mainTempFile = mainTis.getFile();
             extFactory.setConnectionParams(mainTis, metadata, context, this);
-            List<Chat> chatlist = new ArrayList<>();
-            chatlist.addAll(getChatList(extFactory, contacts, account, mainTempFile));
+            Extractor waExtractor = extFactory.createMessageExtractor(mainTempFile, contacts, account);
+            Connection conn = waExtractor.getConnection();
+            DBList<Chat> chatDBList = waExtractor.extractChatList(conn);
+            ModifiedList<Chat> chatlist = new ModifiedList<>(chatDBList);
+            resourcesToClose.addFirst(conn);
+            resourcesToClose.addFirst(chatDBList);
 
             for (IItemBase it : result) {
 
@@ -335,7 +345,12 @@ public class WhatsAppParser extends SQLite3DBParser {
                     TikaInputStream tis = TikaInputStream.get(is, tmp);
                     File tempFile = tis.getFile();
                     extFactory.setConnectionParams(tis, metadata, context, this);
-                    tempChatList = getChatList(extFactory, contacts, account, tempFile);
+                    Extractor tempWaExtractor = extFactory.createMessageExtractor(tempFile, contacts, account);
+                    Connection tempConn = tempWaExtractor.getConnection();
+                    DBList<Chat> tempChatDBList = tempWaExtractor.extractChatList(tempConn);
+                    tempChatList = new ModifiedList<>(tempChatDBList);
+                    resourcesToClose.addFirst(conn);
+                    resourcesToClose.addFirst(tempChatDBList);
                 }
                 
                 ChatMerge cm = new ChatMerge(chatlist, it.getName());
@@ -364,15 +379,15 @@ public class WhatsAppParser extends SQLite3DBParser {
             throw new TikaException("WAExtractorException Exception", e); //$NON-NLS-1$
 
         } finally {
+            while (resourcesToClose.size() > 0) {
+                try {
+                    AutoCloseable toClose = resourcesToClose.removeFirst();
+                    toClose.close();
+                } catch (Exception ex) {
+                }
+            }
             tmp.dispose();
         }
-
-    }
-
-    private List<Chat> getChatList(ExtractorFactory extFactory, WAContactsDirectory contacts, WAAccount account,
-            File dbFile) throws Exception {
-        Extractor waExtractor = extFactory.createMessageExtractor(dbFile, contacts, account);
-        return waExtractor.getChatList();
 
     }
 
@@ -828,7 +843,7 @@ public class WhatsAppParser extends SQLite3DBParser {
         public Extractor createMessageExtractor(File file, WAContactsDirectory directory, WAAccount account) {
             return new ExtractorAndroid(file, directory, account) {
                 @Override
-                protected Connection getConnection() throws SQLException {
+                public Connection getConnection() throws SQLException {
                     return ExtractorAndroidFactory.this.getConnection();
                 }
             };
@@ -854,7 +869,7 @@ public class WhatsAppParser extends SQLite3DBParser {
         public Extractor createMessageExtractor(File file, WAContactsDirectory directory, WAAccount account) {
             return new ExtractorIOS(file, directory, account) {
                 @Override
-                protected Connection getConnection() throws SQLException {
+                public Connection getConnection() throws SQLException {
                     return ExtractorIOSFactory.this.getConnection();
                 }
             };

@@ -2,6 +2,10 @@ package dpf.mg.udi.gpinf.whatsappextractor;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
+
+import dpf.sp.gpinf.indexer.util.DBList;
+import dpf.sp.gpinf.indexer.util.ModifiedList;
 
 /**
  *
@@ -12,7 +16,8 @@ public class Chat {
     private long id;
     private final WAContact remote;
     private String subject;
-    private List<Message> messages;
+    private Supplier<DBList<Message>> messagesSupplier;
+    private List<Message> messages = null;
     private String title = null;
     private boolean groupChat = false;
 
@@ -62,6 +67,9 @@ public class Chat {
      * @return the messages
      */
     public List<Message> getMessages() {
+        if (messages == null) {
+            messages = new ModifiedList<>(messagesSupplier.get());
+        }
         return messages;
     }
 
@@ -69,8 +77,8 @@ public class Chat {
      * @param messages
      *            the messages to set
      */
-    public void setMessages(List<Message> messages) {
-        this.messages = messages;
+    public void setMessagesSupplier(Supplier<DBList<Message>> messagesSupplier) {
+        this.messagesSupplier = messagesSupplier;
     }
 
     public boolean isGroupChat() {

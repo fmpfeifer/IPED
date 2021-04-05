@@ -30,20 +30,19 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 import com.google.common.collect.ImmutableSet;
 
 import dpf.mg.udi.gpinf.whatsappextractor.Message.MessageStatus;
 import dpf.mg.udi.gpinf.whatsappextractor.Message.MessageType;
+import dpf.sp.gpinf.indexer.util.DBList;
 
 /**
  *
@@ -59,36 +58,116 @@ public class ExtractorIOS extends Extractor {
     }
 
     @Override
-    protected List<Chat> extractChatList() throws WAExtractorException {
-        List<Chat> list = new ArrayList<>();
+    public DBList<Chat> extractChatList(Connection conn) throws WAExtractorException {
+        DBList<Chat> list = null;
+        try {
+            PreparedStatement selectStmt = conn.prepareStatement(SELECT_CHAT_LIST);
+            PreparedStatement countStmt = conn.prepareStatement(SELECT_COUNT_CHAT_LIST);
 
-        try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
-            try (ResultSet rs = stmt.executeQuery(SELECT_CHAT_LIST)) {
-                while (rs.next()) {
+            list = new DBList<>(selectStmt, countStmt, 1, 2, rs -> {
+                try {
                     String contactId = rs.getString("contact"); //$NON-NLS-1$
-                    if (!(contactId.endsWith("@status") || contactId.endsWith("@broadcast"))) { //$NON-NLS-1$ //$NON-NLS-2$
-                        WAContact remote = contacts.getContact(contactId);
-                        Chat c = new Chat(remote);
-                        c.setId(rs.getLong("id")); //$NON-NLS-1$
-                        c.setSubject(Util.getUTF8String(rs, "subject")); //$NON-NLS-1$
-                        c.setGroupChat(contactId.endsWith("g.us")); //$NON-NLS-1$
-                        remote.setAvatarPath(rs.getString("avatarPath")); //$NON-NLS-1$
-                        list.add(c);
-                    }
-                }
-
-                for (Chat c : list) {
-                    c.setMessages(extractMessages(conn, c));
+                    WAContact remote = contacts.getContact(contactId);
+                    Chat c = new Chat(remote);
+                    c.setId(rs.getLong("id")); //$NON-NLS-1$
+                    c.setSubject(Util.getUTF8String(rs, "subject")); //$NON-NLS-1$
+                    c.setGroupChat(contactId.endsWith("g.us")); //$NON-NLS-1$
+                    remote.setAvatarPath(rs.getString("avatarPath")); //$NON-NLS-1$
+                    c.setMessagesSupplier(getMessagesSupplier(conn, c));
                     if (c.isGroupChat()) {
                         setGroupMembers(c, conn);
                     }
+                    return c;
+                } catch (SQLException | WAExtractorException ex) {
+                    throw new RuntimeException(ex);
                 }
-            }
+            });
         } catch (SQLException ex) {
             throw new WAExtractorException(ex);
         }
 
         return list;
+    }
+
+    private Supplier<DBList<Message>> getMessagesSupplier(Connection conn, Chat chat) {
+        return () -> {
+            String sql = chat.isGroupChat() ? SELECT_MESSAGES_GROUP : SELECT_MESSAGES_USER;
+            try {
+                PreparedStatement selectStmt = conn.prepareStatement(sql);
+                PreparedStatement countStmt = conn.prepareStatement(SELECT_COUNT_MESSAGES);
+
+                selectStmt.setLong(1, chat.getId());
+                countStmt.setLong(1, chat.getId());
+
+                DBList<Message> messages = new DBList<>(selectStmt, countStmt, 2, 3, rs -> {
+                    try {
+                        Message m = new Message();
+                        if (account != null)
+                            m.setLocalResource(account.getId());
+                        m.setId(rs.getLong("id")); //$NON-NLS-1$
+                        String remoteResource = rs.getString("remoteResource");
+                        if (remoteResource == null || remoteResource.isEmpty() || !chat.isGroupChat()) {
+                            remoteResource = chat.getRemote().getFullId();
+                        }
+                        m.setRemoteResource(remoteResource); // $NON-NLS-1$
+                        m.setStatus(rs.getInt("status")); //$NON-NLS-1$
+                        m.setData(Util.getUTF8String(rs, "data")); //$NON-NLS-1$
+                        m.setFromMe(rs.getInt("fromMe") == 1); //$NON-NLS-1$
+                        if (m.isFromMe()) {
+                            switch (m.getStatus()) {
+                                case 1:
+                                    m.setMessageStatus(MessageStatus.MESSAGE_SENT);
+                                    break;
+                                case 6:
+                                    m.setMessageStatus(MessageStatus.MESSAGE_DELIVERED);
+                                    break;
+                                case 8:
+                                    m.setMessageStatus(MessageStatus.MESSAGE_VIEWED);
+                                    break;
+                                case 9:
+                                    m.setMessageStatus(MessageStatus.MESSAGE_UNSENT);
+                                    break;
+                                default:
+                                    break;
+                            }
+                        }
+                        m.setTimeStamp(dateFormat.parse(rs.getString("timestamp"))); //$NON-NLS-1$
+                        int gEventType = rs.getInt("gEventType"); //$NON-NLS-1$
+                        int messageType = rs.getInt("messageType"); //$NON-NLS-1$
+                        m.setMessageType(decodeMessageType(messageType, gEventType));
+                        if (m.getMessageType() != CONTACT_MESSAGE) {
+                            m.setMediaMime(rs.getString("vCardString")); //$NON-NLS-1$
+                        } else {
+                            String vcards = rs.getString("vCardString"); //$NON-NLS-1$
+                            if (vcards != null) {
+                                m.setVcards(Arrays.asList(vcards.split(Pattern.quote(VCARD_SEPARATOR))));
+                            }
+                        }
+                        m.setMediaName(rs.getString("mediaName")); //$NON-NLS-1$
+                        m.setMediaSize(rs.getLong("mediaSize")); //$NON-NLS-1$
+                        m.setMediaCaption(rs.getString("mediaCaption")); //$NON-NLS-1$
+                        m.setThumbpath(rs.getString("thumbpath")); //$NON-NLS-1$
+                        m.setUrl(rs.getString("url")); //$NON-NLS-1$
+                        m.setLatitude(rs.getDouble("latitude")); //$NON-NLS-1$
+                        m.setLongitude(rs.getDouble("longitude")); //$NON-NLS-1$
+                        if (MEDIA_MESSAGES.contains(m.getMessageType())) {
+                            try {
+                                m.setMediaHash(rs.getString("mediaHash"), true);
+                            } catch (IllegalArgumentException ex) {
+                            } // ignore
+                        }
+                        return m;
+                    } catch (SQLException | ParseException ex) {
+                        throw new RuntimeException(ex);
+                    }
+                });
+
+                return messages;
+
+            } catch (SQLException ex) {
+                throw new RuntimeException(ex);
+            }
+        };
     }
 
     private void setGroupMembers(Chat c, Connection conn) throws WAExtractorException {
@@ -110,80 +189,6 @@ public class ExtractorIOS extends Extractor {
             throw new WAExtractorException(ex);
         }
 
-    }
-
-    private List<Message> extractMessages(Connection conn, Chat chat) throws SQLException {
-        List<Message> messages = new ArrayList<>();
-        String sql = chat.isGroupChat() ? SELECT_MESSAGES_GROUP : SELECT_MESSAGES_USER;
-        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.setFetchSize(1000);
-            stmt.setLong(1, chat.getId());
-            ResultSet rs = stmt.executeQuery();
-            while (rs.next()) {
-                Message m = new Message();
-                if (account != null)
-                    m.setLocalResource(account.getId());
-                m.setId(rs.getLong("id")); //$NON-NLS-1$
-                String remoteResource = rs.getString("remoteResource");
-                if (remoteResource == null || remoteResource.isEmpty() || !chat.isGroupChat()) {
-                    remoteResource = chat.getRemote().getFullId();
-                }
-                m.setRemoteResource(remoteResource); // $NON-NLS-1$
-                m.setStatus(rs.getInt("status")); //$NON-NLS-1$
-                m.setData(Util.getUTF8String(rs, "data")); //$NON-NLS-1$
-                m.setFromMe(rs.getInt("fromMe") == 1); //$NON-NLS-1$
-                if (m.isFromMe()) {
-                    switch (m.getStatus()) {
-                        case 1:
-                            m.setMessageStatus(MessageStatus.MESSAGE_SENT);
-                            break;
-                        case 6:
-                            m.setMessageStatus(MessageStatus.MESSAGE_DELIVERED);
-                            break;
-                        case 8:
-                            m.setMessageStatus(MessageStatus.MESSAGE_VIEWED);
-                            break;
-                        case 9:
-                            m.setMessageStatus(MessageStatus.MESSAGE_UNSENT);
-                            break;
-                        default:
-                            break;
-                    }
-                }
-                try {
-                    m.setTimeStamp(dateFormat.parse(rs.getString("timestamp"))); //$NON-NLS-1$
-                } catch (ParseException e) {
-                    throw new SQLException(e);
-                }
-                int gEventType = rs.getInt("gEventType"); //$NON-NLS-1$
-                int messageType = rs.getInt("messageType"); //$NON-NLS-1$
-                m.setMessageType(decodeMessageType(messageType, gEventType));
-                if (m.getMessageType() != CONTACT_MESSAGE) {
-                    m.setMediaMime(rs.getString("vCardString")); //$NON-NLS-1$
-                } else {
-                    String vcards = rs.getString("vCardString"); //$NON-NLS-1$
-                    if (vcards != null) {
-                        m.setVcards(Arrays.asList(vcards.split(Pattern.quote(VCARD_SEPARATOR))));
-                    }
-                }
-                m.setMediaName(rs.getString("mediaName")); //$NON-NLS-1$
-                m.setMediaSize(rs.getLong("mediaSize")); //$NON-NLS-1$
-                m.setMediaCaption(rs.getString("mediaCaption")); //$NON-NLS-1$
-                m.setThumbpath(rs.getString("thumbpath")); //$NON-NLS-1$
-                m.setUrl(rs.getString("url")); //$NON-NLS-1$
-                m.setLatitude(rs.getDouble("latitude")); //$NON-NLS-1$
-                m.setLongitude(rs.getDouble("longitude")); //$NON-NLS-1$
-                if (MEDIA_MESSAGES.contains(m.getMessageType())) {
-                    try {
-                        m.setMediaHash(rs.getString("mediaHash"), true);
-                    } catch (IllegalArgumentException _) {
-                    } // ignore
-                }
-                messages.add(m);
-
-            }
-        }
-        return messages;
     }
 
     protected Message.MessageType decodeMessageType(int messageType, int gEventType) {
@@ -267,11 +272,17 @@ public class ExtractorIOS extends Extractor {
     /**
      * ** static strings ***
      */
-    private static final String SELECT_CHAT_LIST = "SELECT ZWACHATSESSION.Z_PK as id, ZCONTACTJID AS contact, " //$NON-NLS-1$
+    private static final String SELECT_CHAT_LIST = "WITH cte AS (SELECT ROW_NUMBER() OVER (ORDER BY ZLASTMESSAGEDATE DESC) rowNumber, " //$NON-NLS-1$
+            + "ZWACHATSESSION.Z_PK as id, ZCONTACTJID AS contact, " //$NON-NLS-1$
             + "ZPARTNERNAME as subject, ZLASTMESSAGEDATE, ZPATH as avatarPath " //$NON-NLS-1$
             + "FROM ZWACHATSESSION " //$NON-NLS-1$
             + "LEFT JOIN ZWAPROFILEPICTUREITEM ON ZWAPROFILEPICTUREITEM.ZJID = ZWACHATSESSION.ZCONTACTJID " //$NON-NLS-1$
-            + "ORDER BY ZLASTMESSAGEDATE DESC"; //$NON-NLS-1$
+            + "WHERE NOT (contact LIKE '%@broadcast' OR contact LIKE '%@status') ) " //$NON-NLS-1$
+            + "SELECT * FROM cte WHERE rowNumber > ? AND rowNumber <= ? " //$NON-NLS-1$
+            + "ORDER BY rowNumber"; //$NON-NLS-1$
+    
+    private static final String SELECT_COUNT_CHAT_LIST = "SELECT COUNT(*) AS recordCount FROM ZWACHATSESSION " //$NON-NLS-1$
+            + "WHERE NOT (contact LIKE '%@broadcast' OR contact LIKE '%@status')"; //$NON-NLS-1$
     /*
      * Filtragem por status da mensagem (ZMESSAGESTATUS):
      * 
@@ -283,10 +294,11 @@ public class ExtractorIOS extends Extractor {
      * associada 6 - mensagens 8 - mensagens
      */
 
-    private static final String SELECT_GROUP_MEMBERS = "select CS.ZCONTACTJID as `group`, ZMEMBERJID as member from ZWAGROUPMEMBER GM "
-            + "inner join ZWACHATSESSION CS on GM.ZCHATSESSION=CS.Z_PK where `group`=?";
+    private static final String SELECT_GROUP_MEMBERS = "select CS.ZCONTACTJID as `group`, ZMEMBERJID as member from ZWAGROUPMEMBER GM " //$NON-NLS-1$
+            + "inner join ZWACHATSESSION CS on GM.ZCHATSESSION=CS.Z_PK where `group`=?"; //$NON-NLS-1$
 
-    private static final String SELECT_MESSAGES_USER = "SELECT ZWAMESSAGE.Z_PK AS id, ZCHATSESSION " //$NON-NLS-1$
+    private static final String SELECT_MESSAGES_USER = "WITH cte AS (SELECT ROW_NUMBER() OVER (ORDER BY ZMESSAGEDATE, ZWAMESSAGE.Z_PK) rowNumber, " //$NON-NLS-1$
+            + "ZWAMESSAGE.Z_PK AS id, ZCHATSESSION " //$NON-NLS-1$
             + "as chatId, ZFROMJID AS remoteResource, ZMESSAGESTATUS AS status, ZTEXT AS data, " //$NON-NLS-1$
             + "ZISFROMME AS fromMe, datetime(ZMESSAGEDATE + 978307200,'unixepoch') AS timestamp, " //$NON-NLS-1$
             + "ZVCARDSTRING as vCardString, ZFILESIZE as mediaSize, ZMEDIALOCALPATH " //$NON-NLS-1$
@@ -294,9 +306,10 @@ public class ExtractorIOS extends Extractor {
             + "ZLATITUDE as latitude, ZLONGITUDE as longitude, ZMEDIAURL as url, ZXMPPTHUMBPATH as thumbpath, " //$NON-NLS-1$
             + "ZGROUPEVENTTYPE as gEventType, ZMESSAGETYPE as messageType FROM ZWAMESSAGE " //$NON-NLS-1$
             + "LEFT JOIN ZWAMEDIAITEM ON ZWAMESSAGE.Z_PK = ZWAMEDIAITEM.ZMESSAGE " //$NON-NLS-1$
-            + "WHERE chatId=? ORDER BY ZSORT"; //$NON-NLS-1$
+            + "WHERE chatId=?) SELECT * FROM cte WHERE rowNumber > ? AND rowNumber <= ? ORDER BY rowNumber"; //$NON-NLS-1$
 
-    private static final String SELECT_MESSAGES_GROUP = "SELECT ZWAMESSAGE.Z_PK AS id, ZWAMESSAGE.ZCHATSESSION " //$NON-NLS-1$
+    private static final String SELECT_MESSAGES_GROUP = "WITH cte AS (SELECT ROW_NUMBER() OVER (ORDER BY ZMESSAGEDATE, ZWAMESSAGE.Z_PK) rowNumber, " //$NON-NLS-1$
+            + "ZWAMESSAGE.Z_PK AS id, ZWAMESSAGE.ZCHATSESSION " //$NON-NLS-1$
             + "as chatId, ZMEMBERJID AS remoteResource, ZMESSAGESTATUS AS status, ZTEXT AS data, " //$NON-NLS-1$
             + "ZISFROMME AS fromMe, datetime(ZMESSAGEDATE + 978307200,'unixepoch') AS timestamp, " //$NON-NLS-1$
             + "ZVCARDSTRING as vCardString, ZFILESIZE as mediaSize, ZMEDIALOCALPATH " //$NON-NLS-1$
@@ -305,7 +318,9 @@ public class ExtractorIOS extends Extractor {
             + "ZGROUPEVENTTYPE as gEventType, ZMESSAGETYPE as messageType FROM ZWAMESSAGE " //$NON-NLS-1$
             + "LEFT JOIN ZWAMEDIAITEM ON ZWAMESSAGE.Z_PK = ZWAMEDIAITEM.ZMESSAGE " //$NON-NLS-1$
             + "LEFT JOIN ZWAGROUPMEMBER ON ZWAGROUPMEMBER.ZCHATSESSION = chatId AND ZWAGROUPMEMBER.Z_PK = ZGROUPMEMBER " //$NON-NLS-1$
-            + "WHERE chatId=? ORDER BY ZSORT"; //$NON-NLS-1$
+            + "WHERE chatId=?) SELECT * FROM cte WHERE rowNumber > ? AND rowNumber <= ? ORDER BY rowNumber"; //$NON-NLS-1$
+    
+    private static final String SELECT_COUNT_MESSAGES = "SELECT COUNT(*) as recordCount FROM ZWAMESSAGE WHERE ZCHATSESSION=?"; //$NON-NLS-1$
 
     private static final String VCARD_SEPARATOR = "_$!<VCard-Separator>!$_"; //$NON-NLS-1$
 

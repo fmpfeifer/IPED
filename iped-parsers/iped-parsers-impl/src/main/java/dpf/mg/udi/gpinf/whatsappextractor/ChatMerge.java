@@ -4,6 +4,8 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
+import dpf.sp.gpinf.indexer.util.ModifiedList;
+
 public class ChatMerge {
 
     List<Chat> main;
@@ -58,9 +60,8 @@ public class ChatMerge {
         return totchats > 0;
     }
 
-
     private boolean hasCompatibleMessage(List<Message> backup, List<Message> main) {
-        Collections.sort(main, cmpMessage);
+        quickSort(main, cmpMessage);
         int maxMsgsToCheck = 10;
         for (int i = 0; i < backup.size(); i += Math.max(1, backup.size() / maxMsgsToCheck)) {
             int idx = Collections.binarySearch(main, backup.get(i), cmpMessage);
@@ -86,7 +87,6 @@ public class ChatMerge {
                 tot_rec += mergeMessageList(main.get(indexmain).getMessages(), c.getMessages());
             }
 
-
         }
         return tot_rec;
 
@@ -95,7 +95,7 @@ public class ChatMerge {
     public int mergeMessageList(List<Message> main, List<Message> backup) {
         int tot_rec = 0;
 
-        Collections.sort(main, cmpMessage);
+        quickSort(main, cmpMessage);
         int indexmain = 0;
         for (Message m : backup) {
 
@@ -104,14 +104,13 @@ public class ChatMerge {
                 main.add(-indexmain - 1, m);
                 tot_rec++;
                 m.setRecoveredFrom(dbname);
-            } 
+            }
 
         }
         return tot_rec;
 
     }
 
-    
     private int findChat(List<Chat> l, Chat key) {
         for (int i = 0; i < l.size(); i++) {
             if (l.get(i).getId() == key.getId()) {
@@ -121,4 +120,38 @@ public class ChatMerge {
         return -1;
     }
 
+    private static <T> void quickSort(List<T> list, Comparator<T> comparator) {
+        quickSort(list, 0, list.size() - 1, comparator);
+    }
+
+    private static <T> void quickSort(List<T> list, int low, int high, Comparator<T> comparator) {
+        int i = low;
+        int j = high;
+        T pivot = list.get(low + (high - low) / 2);
+
+        while (i <= j) {
+            while (comparator.compare(list.get(i), pivot) < 0) {
+                i++;
+            }
+
+            while (comparator.compare(list.get(j), pivot) > 0) {
+                j--;
+            }
+
+            if (i <= j) {
+                T temp = list.get(i);
+                list.set(i, list.get(j));
+                list.set(j, temp);
+                i++;
+                j--;
+            }
+        }
+
+        if (low < j) {
+            quickSort(list, low, j, comparator);
+        }
+        if (i < high) {
+            quickSort(list, i, high, comparator);
+        }
+    }
 }
