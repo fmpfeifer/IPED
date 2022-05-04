@@ -12,12 +12,13 @@ import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.ItemEvent;
 import java.awt.event.ItemListener;
-import java.io.DataInputStream;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Set;
@@ -42,6 +43,7 @@ import dpf.sp.gpinf.indexer.config.ConfigurationManager;
 
 public class JMapOptionsPane extends JOptionPane {
 
+    private static final long serialVersionUID = 7849436195846087034L;
     static final String BING_URL = "http://r{s}.ortho.tiles.virtualearth.net/tiles/r{quad}.png?g=1";
     static final String OSM_URL = "https://tile.openstreetmap.org/${z}/${x}/${y}.png";
 
@@ -362,12 +364,13 @@ public class JMapOptionsPane extends JOptionPane {
             File f = getLastGoogleAPIKey();
             try {
                 if (f != null) {
-                    DataInputStream dis;
-                    dis = new DataInputStream(new FileInputStream(f));
-                    googleApiKey = dis.readLine();
-                    if (googleApiKey == null)
-                        return "";
-                    return googleApiKey;
+                    try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(f)))) {
+
+                        googleApiKey = br.readLine();
+                        if (googleApiKey == null)
+                            return "";
+                        return googleApiKey;
+                    }
                 }
             } catch (FileNotFoundException e) {
             } catch (IOException e) {
@@ -383,15 +386,15 @@ public class JMapOptionsPane extends JOptionPane {
         String tileSourceURL = null;
         try {
             if (f != null) {
-                DataInputStream dis;
-                dis = new DataInputStream(new FileInputStream(f));
-                tileSourceURL = dis.readLine();
-                if (tileSourceURL == null)
-                    return null;
-                if (tileSourceURL.length() <= 2) {
-                    return null;
-                } else {
-                    return tileSourceURL;
+                try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(f)))) {
+                    tileSourceURL = br.readLine();
+                    if (tileSourceURL == null)
+                        return null;
+                    if (tileSourceURL.length() <= 2) {
+                        return null;
+                    } else {
+                        return tileSourceURL;
+                    }
                 }
             }
         } catch (FileNotFoundException e) {
